@@ -2,7 +2,9 @@
 
 ## 📊 Overview
 
-This application implements **exponential backoff** retry strategies using Procrastinate's built-in `RetryStrategy` class. All tasks automatically retry on failure with increasing delays.
+This application implements **true exponential backoff** retry strategies using a custom `ExponentialBackoffStrategy` class based on Procrastinate's `BaseRetryStrategy`. All tasks automatically retry on failure with exponentially increasing delays.
+
+**✨ Upgraded Implementation**: Now using true exponential backoff (2^n) instead of linear backoff for optimal retry behavior.
 
 ## 🎯 Configuration
 
@@ -11,9 +13,10 @@ This application implements **exponential backoff** retry strategies using Procr
 ```python
 @app.task(
     queue="api_calls",
-    retry=RetryStrategy(
+    retry=ExponentialBackoffStrategy(
         max_attempts=5,              # Total attempts (1 initial + 4 retries)
-        wait=2.0,                    # Base delay: 2 seconds
+        base_delay=2.0,              # Base delay: 2 seconds
+        max_delay=300.0,             # Maximum delay cap: 5 minutes
         retry_exceptions=[           # Only retry these exceptions
             TaskError,
             httpx.HTTPError,
@@ -24,37 +27,45 @@ This application implements **exponential backoff** retry strategies using Procr
 )
 ```
 
-**Retry Schedule:**
+**Retry Schedule (True Exponential):**
 - Attempt 1: Immediate (0s)
-- Attempt 2: After 2 seconds
-- Attempt 3: After 4 seconds (2 × 2)
-- Attempt 4: After 8 seconds (2 × 4)
-- Attempt 5: After 16 seconds (2 × 8)
+- Attempt 2: After 2 seconds (2 × 2^0)
+- Attempt 3: After 4 seconds (2 × 2^1)
+- Attempt 4: After 8 seconds (2 × 2^2)
+- Attempt 5: After 16 seconds (2 × 2^3)
 
 **Total time before giving up:** ~30 seconds
+**Formula:** `delay = min(base_delay × 2^attempts, max_delay)`
 
 ### Periodic Tasks
 
 **`scheduled_fetch_random_joke`** (runs every 2 minutes):
 ```python
-retry=RetryStrategy(max_attempts=3, wait=2.0)
+retry=ExponentialBackoffStrategy(max_attempts=3, base_delay=2.0, max_delay=60.0)
 ```
 - 3 total attempts with 2s base delay
 - Retries: 0s → 2s → 4s
 
 **`retry_stalled_jobs`** (runs every 10 minutes):
 ```python
-retry=RetryStrategy(max_attempts=3, wait=5.0)
+retry=ExponentialBackoffStrategy(max_attempts=3, base_delay=5.0, max_delay=60.0)
 ```
 - 3 total attempts with 5s base delay
 - Retries: 0s → 5s → 10s
 
+**`health_check_task`** (runs every 5 minutes):
+```python
+retry=ExponentialBackoffStrategy(max_attempts=2, base_delay=10.0, max_delay=30.0)
+```
+- 2 total attempts with 10s base delay
+- Retries: 0s → 10s
+
 ## 🔢 How Exponential Backoff Works
 
-Procrastinate's default retry strategy uses **linear backoff** with the `wait` parameter:
+This application uses **true exponential backoff** with a custom `ExponentialBackoffStrategy` class:
 
-```
-delay = wait × attempt_number
+```python
+delay = min(base_delay × (2 ^ attempts), max_delay)
 ```
 
 ### Example for `fetch_and_cache_joke`:
@@ -62,49 +73,68 @@ delay = wait × attempt_number
 | Attempt | Calculation | Delay | Cumulative Time |
 |---------|-------------|-------|-----------------|
 | 1       | -           | 0s    | 0s              |
-| 2       | 2.0 × 1     | 2s    | 2s              |
-| 3       | 2.0 × 2     | 4s    | 6s              |
-| 4       | 2.0 × 3     | 6s    | 12s             |
-| 5       | 2.0 × 4     | 8s    | 20s             |
+| 2       | 2.0 × 2^0   | 2s    | 2s              |
+| 3       | 2.0 × 2^1   | 4s    | 6s              |
+| 4       | 2.0 × 2^2   | 8s    | 14s             |
+| 5       | 2.0 × 2^3   | 16s   | 30s             |
 
-**Note:** Procrastinate 3.x uses linear backoff by default. For true exponential backoff (2^n), you would need a custom retry strategy.
+**Benefits of True Exponential Backoff:**
+- Prevents thundering herd problem
+- Gives failing services more time to recover
+- Reduces load on struggling systems
+- Industry-standard retry pattern
 
-## 🎨 Custom Exponential Backoff (Optional)
+## 🎨 Custom Exponential Backoff Implementation
 
-If you want true exponential backoff (2^n), you can create a custom retry strategy:
+This application uses a custom `ExponentialBackoffStrategy` class:
 
 ```python
 from procrastinate.retry import BaseRetryStrategy
+from typing import Optional
 
 class ExponentialBackoffStrategy(BaseRetryStrategy):
-    def __init__(self, max_attempts: int = 5, base_delay: float = 2.0, max_delay: float = 300.0):
+    """
+    True exponential backoff retry strategy.
+    Formula: delay = min(base_delay * (2 ^ attempts), max_delay)
+    """
+    
+    def __init__(
+        self,
+        max_attempts: int = 5,
+        base_delay: float = 2.0,
+        max_delay: float = 300.0,
+        retry_exceptions: Optional[list] = None,
+    ):
         self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self.retry_exceptions = retry_exceptions
     
-    def get_schedule_in(self, attempts: int) -> dict | None:
+    def get_schedule_in(
+        self,
+        *,
+        exception: Optional[Exception] = None,
+        attempts: int,
+    ) -> Optional[dict]:
+        # Check if we've exceeded max attempts
         if attempts >= self.max_attempts:
-            return None  # Stop retrying
+            return None
         
-        # Exponential: base_delay × (2 ^ attempts)
+        # Check if exception type should be retried
+        if self.retry_exceptions is not None and exception is not None:
+            if not any(isinstance(exception, exc_type) for exc_type in self.retry_exceptions):
+                return None
+        
+        # Calculate exponential delay
         delay = min(self.base_delay * (2 ** attempts), self.max_delay)
         return {"seconds": int(delay)}
-
-# Use it:
-@app.task(
-    retry=ExponentialBackoffStrategy(max_attempts=5, base_delay=2.0, max_delay=300.0)
-)
-async def my_task():
-    ...
 ```
 
-**True Exponential Schedule:**
-- Attempt 1: 0s
-- Attempt 2: 2s (2 × 2^0)
-- Attempt 3: 4s (2 × 2^1)
-- Attempt 4: 8s (2 × 2^2)
-- Attempt 5: 16s (2 × 2^3)
-- Attempt 6: 32s (2 × 2^4)
+**Key Features:**
+- ✅ True exponential backoff (2^n)
+- ✅ Configurable max delay cap
+- ✅ Exception-specific retry logic
+- ✅ Fully compatible with Procrastinate 3.x+
 
 ## 🛡️ Exception Handling
 
@@ -210,39 +240,43 @@ WHERE id = 1;
 
 ### Benefits
 - ✅ Handles transient failures (network blips, API rate limits)
-- ✅ Reduces load on failing services (delays between retries)
+- ✅ Reduces load on failing services (exponential delays)
 - ✅ Increases success rate without manual intervention
 - ✅ Prevents thundering herd problem
+- ✅ Industry-standard retry pattern
+- ✅ Configurable per-task behavior
+- ✅ Exception-specific retry logic
 
 ### Considerations
 - ⚠️ Failed jobs take longer to complete (up to 30s for 5 attempts)
 - ⚠️ Database stores retry history (more rows in events table)
 - ⚠️ Worker capacity used during retry delays
+- ⚠️ Max delay cap prevents excessive wait times
 
 ## 🎯 Best Practices
 
 ### 1. Choose Appropriate Max Attempts
 ```python
 # Quick operations (< 1s)
-retry=RetryStrategy(max_attempts=3, wait=1.0)
+retry=ExponentialBackoffStrategy(max_attempts=3, base_delay=1.0, max_delay=30.0)
 
 # Medium operations (1-5s)
-retry=RetryStrategy(max_attempts=5, wait=2.0)
+retry=ExponentialBackoffStrategy(max_attempts=5, base_delay=2.0, max_delay=300.0)
 
 # Long operations (> 5s)
-retry=RetryStrategy(max_attempts=3, wait=5.0)
+retry=ExponentialBackoffStrategy(max_attempts=3, base_delay=5.0, max_delay=300.0)
 ```
 
 ### 2. Set Reasonable Delays
 ```python
 # Too short: Hammers failing service
-retry=RetryStrategy(wait=0.1)  # ❌ Bad
+retry=ExponentialBackoffStrategy(base_delay=0.1, max_delay=10.0)  # ❌ Bad
 
 # Good: Gives service time to recover
-retry=RetryStrategy(wait=2.0)  # ✅ Good
+retry=ExponentialBackoffStrategy(base_delay=2.0, max_delay=300.0)  # ✅ Good
 
 # Too long: Wastes time
-retry=RetryStrategy(wait=60.0)  # ⚠️ Maybe too long
+retry=ExponentialBackoffStrategy(base_delay=60.0, max_delay=3600.0)  # ⚠️ Maybe too long
 ```
 
 ### 3. Be Selective with Exceptions
@@ -295,10 +329,22 @@ Then restart the application:
 
 Your application now has:
 - ✅ **Automatic retries** on failure
-- ✅ **Linear backoff** (Procrastinate default)
+- ✅ **True exponential backoff** (2^n formula)
 - ✅ **Configurable attempts** (5 for main tasks, 3 for periodic)
 - ✅ **Exception filtering** (only retry specific errors)
 - ✅ **Idempotent operations** (safe to retry)
 - ✅ **Full observability** (logs + database tracking)
+- ✅ **Job timeout protection** (prevents hanging tasks)
+- ✅ **Stalled job recovery** (automatic failover)
+- ✅ **Health monitoring** (proactive issue detection)
 
-The retry strategy ensures **bulletproof task execution** even when external services are temporarily unavailable! 🚀
+The retry strategy ensures **bulletproof task execution** with zero task loss! 🚀
+
+## 📚 Additional Resources
+
+See `BULLETPROOF_IMPLEMENTATION.md` for comprehensive documentation on:
+- Stalled job recovery
+- Worker reliability configuration
+- Production deployment checklist
+- Testing strategies
+- Monitoring and observability

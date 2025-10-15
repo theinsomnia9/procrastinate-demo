@@ -57,28 +57,36 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Schema already exists or error applying: {e}")
         
-        # Start the worker in the background
+        # Start the worker in the background with optimal reliability settings
         worker_task = asyncio.create_task(
             procrastinate_app.run_worker_async(
                 install_signal_handlers=False,
                 queues=["api_calls", "default"],
-                concurrency=10,              # Handle 10 jobs concurrently
-                shutdown_graceful_timeout=30, # Abort jobs after 30s on shutdown
-                listen_notify=True,          # Real-time job notifications
+                concurrency=settings.worker_concurrency,  # Configurable concurrent jobs
+                wait=True,                    # Wait for jobs even if queue is empty
+                listen_notify=True,           # Real-time job notifications via PostgreSQL LISTEN/NOTIFY
+                delete_jobs="never",          # Keep job history for debugging and monitoring
             )
         )
-        logger.info("Procrastinate worker started with concurrency=10")
+        logger.info(
+            f"Procrastinate worker started with concurrency={settings.worker_concurrency}, "
+            f"listen_notify=True, delete_jobs=never"
+        )
         
         yield
         
         # Shutdown: Cancel worker and wait for graceful shutdown
-        logger.info("Shutting down worker...")
+        logger.info("Shutting down worker gracefully...")
         worker_task.cancel()
         try:
-            await asyncio.wait_for(worker_task, timeout=30)
-            logger.info("Graceful shutdown completed")
+            # Wait for worker to finish with configurable timeout
+            await asyncio.wait_for(worker_task, timeout=settings.worker_timeout)
+            logger.info("Graceful shutdown completed - all jobs finished")
         except asyncio.TimeoutError:
-            logger.warning("Worker shutdown timeout - forcing shutdown")
+            logger.warning(
+                f"Worker shutdown timeout after {settings.worker_timeout}s - "
+                "some jobs may have been aborted"
+            )
         except asyncio.CancelledError:
             logger.info("Worker cancelled successfully")
 

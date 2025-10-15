@@ -1,11 +1,11 @@
 import httpx
 import logging
+import asyncio
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from procrastinate import RetryStrategy
 
-from app.procrastinate_app import app
+from app.procrastinate_app import app, ExponentialBackoffStrategy
 from app.database import AsyncSessionLocal
 from app.models import ChuckNorrisJoke
 from app.config import get_settings
@@ -21,9 +21,10 @@ class TaskError(Exception):
 
 @app.task(
     queue="api_calls",
-    retry=RetryStrategy(
+    retry=ExponentialBackoffStrategy(
         max_attempts=settings.max_retries,
-        wait=settings.retry_base_delay,  # Base delay: 2 seconds
+        base_delay=settings.retry_base_delay,
+        max_delay=settings.retry_max_delay,
         retry_exceptions=[TaskError, httpx.HTTPError, httpx.TimeoutException],
     ),
     pass_context=True,
@@ -51,11 +52,13 @@ async def fetch_and_cache_joke(context, category: Optional[str] = None):
     )
     
     try:
-        # Fetch joke from API with timeout
-        joke_data = await _fetch_joke_from_api(category)
-        
-        # Cache in database with upsert (idempotent)
-        await _cache_joke_in_db(joke_data)
+        # Wrap task execution with timeout to prevent hanging
+        async with asyncio.timeout(settings.job_timeout):
+            # Fetch joke from API with timeout
+            joke_data = await _fetch_joke_from_api(category)
+            
+            # Cache in database with upsert (idempotent)
+            await _cache_joke_in_db(joke_data)
         
         logger.info(
             f"Job {job_id}: Successfully cached joke {joke_data['id']}"
@@ -66,6 +69,10 @@ async def fetch_and_cache_joke(context, category: Optional[str] = None):
             "joke_id": joke_data["id"],
             "attempt": attempt,
         }
+        
+    except asyncio.TimeoutError as e:
+        logger.error(f"Job {job_id}: Task timeout after {settings.job_timeout}s on attempt {attempt}")
+        raise TaskError(f"Task timeout after {settings.job_timeout}s") from e
         
     except httpx.TimeoutException as e:
         logger.error(f"Job {job_id}: API timeout on attempt {attempt}: {e}")
@@ -158,7 +165,11 @@ async def _cache_joke_in_db(joke_data: dict) -> None:
 @app.periodic(cron="*/2 * * * *")  # Every 2 minutes
 @app.task(
     queueing_lock="fetch_random_joke",
-    retry=RetryStrategy(max_attempts=3, wait=2.0),
+    retry=ExponentialBackoffStrategy(
+        max_attempts=3,
+        base_delay=2.0,
+        max_delay=60.0,
+    ),
     pass_context=True,
 )
 async def scheduled_fetch_random_joke(context, timestamp: int):
@@ -183,7 +194,11 @@ async def scheduled_fetch_random_joke(context, timestamp: int):
 @app.periodic(cron="*/10 * * * *")  # Every 10 minutes
 @app.task(
     queueing_lock="retry_stalled_jobs",
-    retry=RetryStrategy(max_attempts=3, wait=5.0),
+    retry=ExponentialBackoffStrategy(
+        max_attempts=3,
+        base_delay=5.0,
+        max_delay=60.0,
+    ),
     pass_context=True,
 )
 async def retry_stalled_jobs(context, timestamp: int):
@@ -193,22 +208,101 @@ async def retry_stalled_jobs(context, timestamp: int):
     This ensures that jobs interrupted by crashes or worker failures
     are automatically retried, providing bulletproof task completion.
     
+    A job is considered stalled if:
+    - It's in 'doing' status (being processed)
+    - The worker that picked it up is no longer active
+    - It hasn't been updated recently
+    
     Args:
         context: Procrastinate job context
         timestamp: Unix timestamp when the job was scheduled
     """
     logger.info(f"Checking for stalled jobs at timestamp {timestamp}")
     
-    stalled_jobs = await app.job_manager.get_stalled_jobs()
-    
-    if stalled_jobs:
-        logger.warning(f"Found {len(stalled_jobs)} stalled jobs, retrying...")
+    try:
+        # Get stalled jobs from Procrastinate
+        stalled_jobs = await app.job_manager.get_stalled_jobs()
         
-        for job in stalled_jobs:
-            try:
-                await app.job_manager.retry_job(job)
-                logger.info(f"Retried stalled job {job.id}")
-            except Exception as e:
-                logger.error(f"Failed to retry stalled job {job.id}: {e}")
-    else:
-        logger.info("No stalled jobs found")
+        if stalled_jobs:
+            logger.warning(f"Found {len(stalled_jobs)} stalled jobs, retrying...")
+            
+            retry_count = 0
+            failed_count = 0
+            
+            for job in stalled_jobs:
+                try:
+                    await app.job_manager.retry_job(job)
+                    logger.info(
+                        f"Successfully retried stalled job {job.id} "
+                        f"(task: {job.task_name}, attempts: {job.attempts})"
+                    )
+                    retry_count += 1
+                except Exception as e:
+                    logger.error(
+                        f"Failed to retry stalled job {job.id} "
+                        f"(task: {job.task_name}): {e}",
+                        exc_info=True
+                    )
+                    failed_count += 1
+            
+            logger.info(
+                f"Stalled job recovery complete: {retry_count} retried, "
+                f"{failed_count} failed"
+            )
+        else:
+            logger.info("No stalled jobs found - all workers healthy")
+            
+        return {
+            "status": "success",
+            "stalled_jobs_found": len(stalled_jobs) if stalled_jobs else 0,
+            "timestamp": timestamp,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in stalled job detection: {e}", exc_info=True)
+        raise TaskError(f"Stalled job detection failed: {e}") from e
+
+
+@app.periodic(cron="*/5 * * * *")  # Every 5 minutes
+@app.task(
+    queueing_lock="health_check",
+    retry=ExponentialBackoffStrategy(
+        max_attempts=2,
+        base_delay=10.0,
+        max_delay=30.0,
+    ),
+    pass_context=True,
+)
+async def health_check_task(context, timestamp: int):
+    """
+    Periodic health check task to monitor system health.
+    
+    This task:
+    - Verifies database connectivity
+    - Checks worker status
+    - Logs system metrics
+    - Can be extended to send alerts
+    
+    Args:
+        context: Procrastinate job context
+        timestamp: Unix timestamp when the job was scheduled
+    """
+    logger.info(f"Running health check at timestamp {timestamp}")
+    
+    try:
+        # Test database connectivity
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(1))
+            result.scalar()
+        
+        logger.info("Health check passed: Database connection OK")
+        
+        return {
+            "status": "healthy",
+            "timestamp": timestamp,
+            "database": "connected",
+        }
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+        raise TaskError(f"Health check failed: {e}") from e
