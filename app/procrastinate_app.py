@@ -37,6 +37,40 @@ class ExponentialBackoffStrategy(BaseRetryStrategy):
         self.max_delay = max_delay
         self.retry_exceptions = retry_exceptions
     
+    def get_retry_decision(
+        self,
+        *,
+        exception: Optional[Exception] = None,
+        job,
+    ):
+        """
+        Calculate the delay before next retry (new API).
+        
+        Args:
+            exception: The exception that caused the failure
+            job: The job object with attempts information
+            
+        Returns:
+            RetryDecision or None to stop retrying
+        """
+        from procrastinate.retry import RetryDecision
+        
+        attempts = job.attempts
+        
+        # Check if we've exceeded max attempts
+        if attempts >= self.max_attempts:
+            return None
+        
+        # Check if exception type should be retried
+        if self.retry_exceptions is not None and exception is not None:
+            if not any(isinstance(exception, exc_type) for exc_type in self.retry_exceptions):
+                return None
+        
+        # Calculate exponential delay: base_delay * (2 ^ attempts)
+        delay_seconds = min(self.base_delay * (2 ** attempts), self.max_delay)
+        
+        return RetryDecision(retry_in=int(delay_seconds))
+    
     def get_schedule_in(
         self,
         *,
@@ -44,7 +78,7 @@ class ExponentialBackoffStrategy(BaseRetryStrategy):
         attempts: int,
     ) -> Optional[dict]:
         """
-        Calculate the delay before next retry.
+        Calculate the delay before next retry (deprecated, for backwards compatibility).
         
         Args:
             exception: The exception that caused the failure
@@ -76,8 +110,4 @@ app = procrastinate.App(
         max_size=20,  # Note: psycopg3 uses 'max_size' not 'maxsize'
     ),
     import_paths=["app.tasks"],
-    # Set periodic deferrer for scheduled tasks
-    periodic_defaults={
-        "periodic_defer_lock": True,  # Prevent duplicate periodic tasks
-    },
 )

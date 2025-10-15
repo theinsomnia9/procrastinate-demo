@@ -122,8 +122,10 @@ class TestExponentialBackoffIntegration:
         
         # Mock a successful API response
         mock_fetch = AsyncMock(return_value={'id': 'test', 'value': 'joke', 'categories': []})
+        mock_cache = AsyncMock()
         
-        with patch('app.tasks._fetch_joke_from_api', mock_fetch):
+        with patch('app.tasks._fetch_joke_from_api', mock_fetch), \
+             patch('app.tasks._cache_joke_in_db', mock_cache):
             # Set up the settings
             with patch('app.tasks.settings.max_retries', 3):
                 with patch('app.tasks.settings.retry_base_delay', 1.0):
@@ -140,6 +142,7 @@ class TestExponentialBackoffIntegration:
                         
                         # Verify the API was called once (no retries needed for success)
                         mock_fetch.assert_awaited_once_with('dev')
+                        mock_cache.assert_awaited_once()
     
     async def test_exponential_delay_progression(self):
         """Test that retry delays follow exponential pattern."""
