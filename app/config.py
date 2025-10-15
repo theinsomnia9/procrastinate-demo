@@ -25,9 +25,10 @@ class Settings(BaseSettings):
     stalled_job_check_interval: int = 10  # Check every 10 minutes (cron: */10)
     stalled_job_threshold: int = 600  # Consider job stalled after 10 minutes
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False
+    }
 
 
 @lru_cache()
