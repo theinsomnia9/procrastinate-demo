@@ -80,7 +80,7 @@ procrastinate_app.run_worker_async(
 ```python
 connector=procrastinate.PsycopgConnector(
     conninfo=settings.procrastinate_database_url,
-    maxsize=20,  # Connection pool size
+    max_size=20,  # Connection pool size (psycopg3 parameter)
 )
 ```
 

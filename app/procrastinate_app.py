@@ -73,7 +73,7 @@ app = procrastinate.App(
     connector=procrastinate.PsycopgConnector(
         conninfo=settings.procrastinate_database_url,
         # Enable connection pooling for better performance
-        maxsize=20,
+        max_size=20,  # Note: psycopg3 uses 'max_size' not 'maxsize'
     ),
     import_paths=["app.tasks"],
     # Set periodic deferrer for scheduled tasks

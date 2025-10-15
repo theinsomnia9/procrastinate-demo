@@ -116,7 +116,7 @@ procrastinate_app.run_worker_async(
 ```python
 connector=procrastinate.PsycopgConnector(
     conninfo=settings.procrastinate_database_url,
-    maxsize=20,  # Connection pool size
+    max_size=20,  # Connection pool size (psycopg3 parameter)
 )
 ```
 
@@ -174,7 +174,7 @@ STALLED_JOB_THRESHOLD=600       # Consider stalled after 10 minutes
 | Job Timeout | None | 300s configurable timeout |
 | Stalled Job Recovery | Basic | Enhanced with metrics |
 | Worker Configuration | Basic | Optimized for reliability |
-| Connection Pooling | Default | Configured (maxsize=20) |
+| Connection Pooling | Default | Configured (max_size=20) |
 | Health Monitoring | None | Periodic health checks |
 | Configuration | Hardcoded | Environment-based |
 | Job History | Default | Preserved (delete_jobs="never") |
