@@ -306,3 +306,147 @@ async def health_check_task(context, timestamp: int):
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
         raise TaskError(f"Health check failed: {e}") from e
+
+
+@app.task(
+    queue="test_failures",
+    retry=ExponentialBackoffStrategy(
+        max_attempts=5,  # Will fail 4 times, succeed on 5th attempt
+        base_delay=2.0,
+        max_delay=30.0,
+        retry_exceptions=[TaskError, ValueError, RuntimeError],
+    ),
+    pass_context=True,
+)
+async def failing_task_for_retry_testing(context, fail_attempts: int = 4):
+    """
+    A task that intentionally fails for testing retry functionality.
+    
+    This task will:
+    - Fail for the first N attempts with different exception types
+    - Succeed on the final attempt
+    - Log detailed information about each attempt
+    - Store attempt information in the database for verification
+    
+    Args:
+        context: Procrastinate job context (automatically passed)
+        fail_attempts: Number of attempts that should fail before succeeding
+    """
+    attempt = context.job.attempts
+    job_id = context.job.id
+    
+    logger.info(
+        f"Job {job_id}: Retry test task starting (attempt {attempt}/{settings.max_retries}), "
+        f"will fail for first {fail_attempts} attempts"
+    )
+    
+    # Store attempt information in database for verification
+    await _log_retry_attempt(job_id, attempt, fail_attempts)
+    
+    if attempt <= fail_attempts:
+        # Simulate different types of failures
+        if attempt == 1:
+            logger.error(f"Job {job_id}: Simulating network timeout (attempt {attempt})")
+            raise TaskError("Simulated network timeout - testing retry mechanism")
+        elif attempt == 2:
+            logger.error(f"Job {job_id}: Simulating database connection error (attempt {attempt})")
+            raise ValueError("Simulated database connection error - testing retry mechanism")
+        elif attempt == 3:
+            logger.error(f"Job {job_id}: Simulating API rate limit (attempt {attempt})")
+            raise RuntimeError("Simulated API rate limit - testing retry mechanism")
+        else:
+            logger.error(f"Job {job_id}: Simulating generic failure (attempt {attempt})")
+            raise TaskError(f"Simulated failure on attempt {attempt} - testing retry mechanism")
+    
+    # Success case
+    logger.info(f"Job {job_id}: SUCCESS! Task completed on attempt {attempt}")
+    
+    return {
+        "status": "success",
+        "job_id": job_id,
+        "final_attempt": attempt,
+        "total_failures": fail_attempts,
+        "message": f"Task succeeded after {fail_attempts} failures"
+    }
+
+
+async def _log_retry_attempt(job_id: int, attempt: int, fail_attempts: int) -> None:
+    """
+    Log retry attempt information to database for verification.
+    
+    This creates a simple log entry that can be queried to verify
+    retry behavior is working correctly.
+    
+    Args:
+        job_id: Procrastinate job ID
+        attempt: Current attempt number
+        fail_attempts: Number of attempts configured to fail
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            # Use a simple upsert to track retry attempts
+            # We'll store this as a "joke" with special formatting for easy identification
+            retry_log_id = f"retry_test_{job_id}_attempt_{attempt}"
+            
+            stmt = insert(ChuckNorrisJoke).values(
+                joke_id=retry_log_id,
+                category="retry_test",
+                joke_text=f"Retry test log: Job {job_id}, Attempt {attempt}/{fail_attempts + 1}",
+                icon_url=None,
+                url=f"internal://retry_test/{job_id}",
+            )
+            
+            # On conflict, update with latest attempt info
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["joke_id"],
+                set_={
+                    "joke_text": stmt.excluded.joke_text,
+                    "url": stmt.excluded.url,
+                }
+            )
+            
+            await session.execute(stmt)
+            await session.commit()
+            
+            logger.debug(f"Logged retry attempt for job {job_id}, attempt {attempt}")
+            
+        except Exception as e:
+            await session.rollback()
+            logger.warning(f"Failed to log retry attempt: {e}")
+            # Don't raise - this is just logging, shouldn't affect main task
+
+
+@app.task(
+    queue="test_queue",
+    retry=ExponentialBackoffStrategy(
+        max_attempts=3,
+        base_delay=1.0,
+        max_delay=10.0,
+    ),
+    pass_context=True,
+)
+async def enqueue_failing_task(context, fail_attempts: int = 4):
+    """
+    Helper task to enqueue the failing task for testing.
+    
+    This makes it easy to trigger retry testing from the command line
+    or from other parts of the application.
+    
+    Args:
+        context: Procrastinate job context
+        fail_attempts: Number of attempts that should fail before succeeding
+    """
+    job_id = context.job.id
+    logger.info(f"Job {job_id}: Enqueueing failing task for retry testing (fail_attempts={fail_attempts})")
+    
+    # Defer the failing task
+    deferred_job = await failing_task_for_retry_testing.defer_async(fail_attempts=fail_attempts)
+    
+    logger.info(f"Job {job_id}: Successfully enqueued failing task with job ID {deferred_job.id}")
+    
+    return {
+        "status": "success",
+        "enqueued_job_id": deferred_job.id,
+        "fail_attempts": fail_attempts,
+        "message": f"Enqueued failing task that will fail {fail_attempts} times before succeeding"
+    }

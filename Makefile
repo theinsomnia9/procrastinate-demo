@@ -16,6 +16,12 @@ help:
 	@echo "  make logs              - View Docker logs"
 	@echo "  make db-init           - Initialize database and Procrastinate schema"
 	@echo ""
+	@echo "Tracing:"
+	@echo "  make tracing-start     - Start services with Jaeger for tracing"
+	@echo "  make tracing-demo      - Run OpenTelemetry tracing demo"
+	@echo "  make tracing-simple    - Run simple tracing example"
+	@echo "  make jaeger-ui         - Open Jaeger UI in browser"
+	@echo ""
 	@echo "Testing:"
 	@echo "  make test              - Run all unit and integration tests"
 	@echo "  make test-unit         - Run unit tests only"
@@ -98,6 +104,25 @@ coverage:
 	pytest tests/ --cov=app --cov-report=html --cov-report=term
 	@echo ""
 	@echo "Coverage report generated in htmlcov/index.html"
+
+# Tracing commands
+tracing-start:
+	docker-compose up -d postgres jaeger
+	@echo "Waiting for services to be ready..."
+	@sleep 10
+	@echo "✓ Tracing services started"
+	@echo "  PostgreSQL: localhost:5432"
+	@echo "  Jaeger UI: http://localhost:16686"
+
+tracing-demo:
+	python tracing_demo.py
+
+tracing-simple:
+	python simple_tracing_example.py
+
+jaeger-ui:
+	@echo "Opening Jaeger UI..."
+	@python -c "import webbrowser; webbrowser.open('http://localhost:16686')"
 
 clean:
 	docker-compose down -v

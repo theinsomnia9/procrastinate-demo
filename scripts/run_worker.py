@@ -29,11 +29,11 @@ async def main():
     
     async with procrastinate_app.open_async():
         logger.info("Worker connected to database")
-        logger.info("Listening on queues: api_calls, default")
+        logger.info("Listening on queues: api_calls, default, traced_api_calls, traced_processing, retry_demo")
         
         try:
             await procrastinate_app.run_worker_async(
-                queues=["api_calls", "default"],
+                queues=["api_calls", "default", "traced_api_calls", "traced_processing", "retry_demo"],
                 wait=True,
             )
         except KeyboardInterrupt:

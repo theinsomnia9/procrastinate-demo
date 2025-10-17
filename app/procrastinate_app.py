@@ -69,7 +69,7 @@ class ExponentialBackoffStrategy(BaseRetryStrategy):
         # Calculate exponential delay: base_delay * (2 ^ attempts)
         delay_seconds = min(self.base_delay * (2 ** attempts), self.max_delay)
         
-        return RetryDecision(retry_in=int(delay_seconds))
+        return RetryDecision(retry_in={"seconds": int(delay_seconds)})
     
     def get_schedule_in(
         self,
@@ -109,5 +109,5 @@ app = procrastinate.App(
         # Enable connection pooling for better performance
         max_size=20,  # Note: psycopg3 uses 'max_size' not 'maxsize'
     ),
-    import_paths=["app.tasks"],
+    import_paths=["app.tasks", "app.traced_tasks", "app.retry_tasks"],
 )
